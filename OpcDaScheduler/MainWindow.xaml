@@ -60,8 +60,12 @@
             </DataGrid>
         </GroupBox>
 
+        <!-- Кнопки действий -->
         <StackPanel Grid.Row="2" Grid.ColumnSpan="3" Orientation="Horizontal" HorizontalAlignment="Right">
             <Button Content="Прочитать выбранные" Click="ReadSelected_Click" Padding="12,4"/>
+            <Button Content="Записать как ЧАС"   Click="WriteHour_Click"  Padding="12,4" Margin="8,0,0,0"/>
+            <Button Content="Записать как СМЕНА" Click="WriteShift_Click" Padding="12,4" Margin="8,0,0,0"/>
+            <Button Content="Записать как СУТКИ" Click="WriteDay_Click"   Padding="12,4" Margin="8,0,0,0"/>
         </StackPanel>
     </Grid>
 </Window>

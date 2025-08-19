@@ -1,14 +1,18 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Windows;
 using OPCAutomation;
 
-// добавлено для шага 8
-using OpcDaScheduler.Services;
 using Serilog;
+using Npgsql;
+
+// наши сервисы/модели
+using OpcDaScheduler.Services;
+using OpcDaScheduler.Models;
 
 namespace OpcDaScheduler
 {
@@ -23,11 +27,11 @@ namespace OpcDaScheduler
             InitializeComponent();
             ResultsGrid.ItemsSource = _results;
 
-            // Если не добавляли Loaded="Window_Loaded" в XAML, можно раскомментировать:
+            // Если в XAML нет Loaded="Window_Loaded", можно раскомментировать:
             // this.Loaded += Window_Loaded;
         }
 
-        // ======== Шаг 8: быстрая диагностика подключения к БД при старте =========
+        // ======== Диагностика подключения к БД при старте =========
         private async void Window_Loaded(object sender, RoutedEventArgs e)
         {
             var ok = await Db.PingAsync(AppConfig.ConnectionString);
@@ -39,18 +43,16 @@ namespace OpcDaScheduler
 
             Log.Information("Diagnostics shown. DB={Status}", ok ? "OK" : "FAILED");
 
-            // --- Отладка расчёта периодов (час/смена/сутки) ---
+            // Отладка расчёта периодов (час/смена/сутки)
             var now = PeriodHelper.NowLocal();
             var hourStart = PeriodHelper.GetHourStart(now);
             var shiftNo = PeriodHelper.GetShiftNo(now);
             var shiftStart = PeriodHelper.GetShiftStart(now);
             var dayStart = PeriodHelper.GetDayStart(now);
-
             Log.Information("Period debug: now={Now}, hourStart={HourStart}, shiftStart={ShiftStart}, dayStart={DayStart}, shift={Shift}",
                 now, hourStart, shiftStart, dayStart, shiftNo);
-            // ---------------------------------------------------
         }
-        // ========================================================================
+        // ==========================================================
 
         // Найти OPC-DA серверы на указанном хосте (OPCEnum)
         private void RefreshServers_Click(object sender, RoutedEventArgs e)
@@ -226,6 +228,218 @@ namespace OpcDaScheduler
             t.IsBackground = true;
             t.SetApartmentState(ApartmentState.STA);
             t.Start();
+        }
+
+        // ==================== НОВОЕ: запись в БД ====================
+
+        // Кнопки из XAML
+        private void WriteHour_Click(object sender, RoutedEventArgs e) => StartWrite(PeriodType.Hour);
+        private void WriteShift_Click(object sender, RoutedEventArgs e) => StartWrite(PeriodType.Shift);
+        private void WriteDay_Click(object sender, RoutedEventArgs e) => StartWrite(PeriodType.Day);
+
+        // Запуск мастера записи
+        private void StartWrite(PeriodType type)
+        {
+            if (_server == null || _root == null)
+            {
+                MessageBox.Show("Нет подключения к OPC-серверу.");
+                return;
+            }
+
+            var selected = GetCheckedLeaves(_root).ToArray();
+            if (selected.Length == 0)
+            {
+                MessageBox.Show("Отметьте галочками хотя бы один тег.");
+                return;
+            }
+
+            // Диалог сопоставления OPC→TagId/Formula
+            var dlg = new TagMappingDialog { Owner = this };
+            dlg.LoadFromOpcIds(selected);
+            if (dlg.ShowDialog() != true) return;
+
+            var map = dlg.Items.Where(i => i.TargetTagId > 0 || !string.IsNullOrWhiteSpace(i.Alias))
+                               .ToDictionary(x => x.OpcItemId, x => x);
+
+            if (map.Count == 0)
+            {
+                MessageBox.Show("Не указаны данные для записи (TagId/Alias).", "Внимание",
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            // Вся логика в STA-потоке (COM)
+            var t = new Thread(() => WriteSelectedAsync(type, map));
+            t.IsBackground = true;
+            t.SetApartmentState(ApartmentState.STA);
+            t.Start();
+        }
+
+        // Основная логика записи
+        private async void WriteSelectedAsync(PeriodType type, Dictionary<string, TagMapEntry> map)
+        {
+            try
+            {
+                if (_server == null)
+                {
+                    Dispatcher.Invoke(() => MessageBox.Show("Нет подключения к OPC-серверу."));
+                    return;
+                }
+
+                // 1) Разовое чтение текущих значений
+                var values = ReadValuesOnce(_server, map.Keys);
+
+                // 2) Расчёт временных границ
+                var now = PeriodHelper.NowLocal();
+                DateTime periodStart;
+                string periodType;
+                int? hourNo = null;
+                int? shiftNo = null;
+
+                switch (type)
+                {
+                    case PeriodType.Hour:
+                        periodStart = PeriodHelper.GetHourStart(now);
+                        periodType = "Hour";
+                        hourNo = now.Hour;
+                        break;
+
+                    case PeriodType.Shift:
+                        periodStart = PeriodHelper.GetShiftStart(now);
+                        periodType = "Shift";
+                        shiftNo = PeriodHelper.GetShiftNo(now);
+                        break;
+
+                    default: // Day
+                        periodStart = PeriodHelper.GetDayStart(now);
+                        periodType = "Day";
+                        break;
+                }
+
+                // 3) Запись в БД (апсерт)
+                int ok = 0, skip = 0, fail = 0;
+                await using var conn = new NpgsqlConnection(AppConfig.ConnectionString);
+                await conn.OpenAsync();
+
+                // определить схему tag_data (legacy или новая)
+                var schema = await DbWriter.DetectTagDataSchemaAsync(conn);
+
+                foreach (var kv in map)
+                {
+                    var itemId = kv.Key;
+                    var cfg = kv.Value;
+
+                    if (!values.TryGetValue(itemId, out var raw) || raw is null)
+                    {
+                        Log.Warning("Skip write: no value for {ItemId}", itemId);
+                        skip++; continue;
+                    }
+
+                    double x;
+                    try
+                    {
+                        x = Convert.ToDouble(raw, CultureInfo.InvariantCulture);
+                    }
+                    catch
+                    {
+                        Log.Warning("Skip write: value not convertible to double. {ItemId}={Raw}", itemId, raw);
+                        skip++; continue;
+                    }
+
+                    var y = FormulaEngine.Eval(cfg.Formula, x, now, shiftNo ?? 0);
+
+                    try
+                    {
+                        if (schema == TagDataSchema.LegacyV1)
+                        {
+                            // Производственная дата (сутки с 22:00) в колонку date (DATE)
+                            var prodDate = PeriodHelper.GetDayStart(now).Date;
+                            var periodStr = periodType.ToLowerInvariant(); // "hour"/"shift"/"day"
+                            var tagName = string.IsNullOrWhiteSpace(cfg.Alias) ? itemId : cfg.Alias;
+
+                            // >>> Новое: гарантируем, что tag_name существует в справочнике ФК
+                            await DbWriter.EnsureLegacyTagExistsAsync(conn, tagName);
+
+                            await DbWriter.UpsertLegacyAsync(
+                                conn,
+                                tagName: tagName,
+                                date: prodDate,
+                                period: periodStr,
+                                hourNum: hourNo,
+                                shiftNum: shiftNo,
+                                value: y,
+                                source: "OpcDaScheduler");
+                        }
+                        else
+                        {
+                            // Новая схема (tagid/periodstart/...)
+                            var row = new TagDataRow
+                            {
+                                TagId = cfg.TargetTagId,
+                                PeriodStart = periodStart,
+                                PeriodType = periodType,
+                                HourNo = hourNo,
+                                ShiftNo = shiftNo,
+                                Value = y
+                            };
+                            await DbWriter.UpsertAsync(conn, row);
+                        }
+
+                        ok++;
+                    }
+                    catch (Exception exUp)
+                    {
+                        Log.Error(exUp, "Upsert failed for map ItemId={ItemId}", itemId);
+                        fail++;
+                    }
+                }
+
+                Dispatcher.Invoke(() => MessageBox.Show(
+                    $"Готово: записано {ok}, пропущено {skip}, ошибок {fail}.",
+                    "Запись в БД",
+                    MessageBoxButton.OK,
+                    fail == 0 ? MessageBoxImage.Information : MessageBoxImage.Exclamation));
+            }
+            catch (Exception ex)
+            {
+                Dispatcher.Invoke(() => MessageBox.Show(ex.Message, "Ошибка записи",
+                    MessageBoxButton.OK, MessageBoxImage.Error));
+                Log.Error(ex, "WriteSelected failed");
+            }
+        }
+
+        // Одноразовое чтение значений по списку ItemId
+        private static Dictionary<string, object?> ReadValuesOnce(OPCServer server, IEnumerable<string> itemIds)
+        {
+            var result = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+            OPCGroup? g = null;
+            try
+            {
+                g = server.OPCGroups.Add("write_read_" + Guid.NewGuid().ToString("N"));
+                g.IsActive = true; g.IsSubscribed = false;
+                var items = g.OPCItems;
+
+                int handle = 1;
+                foreach (var id in itemIds)
+                {
+                    try
+                    {
+                        var it = items.AddItem(id, handle++);
+                        it.Read((short)OPCDataSource.OPCDevice, out object v, out object q, out object ts);
+                        result[id] = v;
+                    }
+                    catch (Exception exAdd)
+                    {
+                        Log.Warning(exAdd, "Cannot add/read OPC item {ItemId}", id);
+                        result[id] = null;
+                    }
+                }
+            }
+            finally
+            {
+                try { if (g != null) server.OPCGroups.Remove(g.Name); } catch { }
+            }
+            return result;
         }
 
         // Сбор всех отмеченных ItemID

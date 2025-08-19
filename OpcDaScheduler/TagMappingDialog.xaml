@@ -1,0 +1,30 @@
+﻿<Window x:Class="OpcDaScheduler.TagMappingDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Настройка записи в БД"
+        WindowStartupLocation="CenterOwner"
+        SizeToContent="WidthAndHeight"
+        ResizeMode="NoResize">
+    <DockPanel Margin="12">
+        <DataGrid x:Name="Grid"
+                  ItemsSource="{Binding}"
+                  AutoGenerateColumns="False"
+                  CanUserAddRows="False"
+                  MinWidth="800"
+                  MinHeight="260"
+                  DockPanel.Dock="Top"
+                  Margin="0,0,0,8">
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="OPC ItemId" Binding="{Binding OpcItemId}" Width="*" IsReadOnly="True"/>
+                <DataGridTextColumn Header="Alias"      Binding="{Binding Alias}"     Width="180"/>
+                <DataGridTextColumn Header="TagId (БД)" Binding="{Binding TargetTagId}" Width="120"/>
+                <DataGridTextColumn Header="Formula"    Binding="{Binding Formula}"   Width="160"/>
+            </DataGrid.Columns>
+        </DataGrid>
+
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Content="OK"     Width="110" Margin="0,0,8,0" IsDefault="True" Click="Ok_Click"/>
+            <Button Content="Отмена" Width="110" IsCancel="True"/>
+        </StackPanel>
+    </DockPanel>
+</Window>
