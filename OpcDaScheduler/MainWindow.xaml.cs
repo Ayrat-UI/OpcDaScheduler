@@ -6,6 +6,10 @@ using System.Threading;
 using System.Windows;
 using OPCAutomation;
 
+// добавлено для шага 8
+using OpcDaScheduler.Services;
+using Serilog;
+
 namespace OpcDaScheduler
 {
     public partial class MainWindow : Window
@@ -18,7 +22,35 @@ namespace OpcDaScheduler
         {
             InitializeComponent();
             ResultsGrid.ItemsSource = _results;
+
+            // Если не добавляли Loaded="Window_Loaded" в XAML, можно раскомментировать:
+            // this.Loaded += Window_Loaded;
         }
+
+        // ======== Шаг 8: быстрая диагностика подключения к БД при старте =========
+        private async void Window_Loaded(object sender, RoutedEventArgs e)
+        {
+            var ok = await Db.PingAsync(AppConfig.ConnectionString);
+            MessageBox.Show(
+                ok ? "PostgreSQL: OK" : "PostgreSQL: FAILED.\nПроверьте ConnectionString в appsettings.json",
+                "Diagnostics",
+                MessageBoxButton.OK,
+                ok ? MessageBoxImage.Information : MessageBoxImage.Error);
+
+            Log.Information("Diagnostics shown. DB={Status}", ok ? "OK" : "FAILED");
+
+            // --- Отладка расчёта периодов (час/смена/сутки) ---
+            var now = PeriodHelper.NowLocal();
+            var hourStart = PeriodHelper.GetHourStart(now);
+            var shiftNo = PeriodHelper.GetShiftNo(now);
+            var shiftStart = PeriodHelper.GetShiftStart(now);
+            var dayStart = PeriodHelper.GetDayStart(now);
+
+            Log.Information("Period debug: now={Now}, hourStart={HourStart}, shiftStart={ShiftStart}, dayStart={DayStart}, shift={Shift}",
+                now, hourStart, shiftStart, dayStart, shiftNo);
+            // ---------------------------------------------------
+        }
+        // ========================================================================
 
         // Найти OPC-DA серверы на указанном хосте (OPCEnum)
         private void RefreshServers_Click(object sender, RoutedEventArgs e)
@@ -57,7 +89,7 @@ namespace OpcDaScheduler
             {
                 DisconnectInternal();
 
-                _server = new OPCServer();                     // UI-нить WPF — STA, это ок
+                _server = new OPCServer(); // UI-нить WPF — STA, это ок
                 _server.Connect(progId, HostBox.Text.Trim());
 
                 var br = _server.CreateBrowser();
@@ -101,7 +133,7 @@ namespace OpcDaScheduler
         // Рекурсивный обход дерева OPCBrowser: ветви + листья
         private void BuildTreeRecursive(OPCBrowser br, Node parent)
         {
-            foreach (object b in br)            // перечисляем ветви текущего уровня
+            foreach (object b in br) // перечисляем ветви текущего уровня
             {
                 string name = b.ToString()!;
                 br.MoveDown(name);
@@ -109,9 +141,9 @@ namespace OpcDaScheduler
                 var branch = new Node { Name = name };
 
                 br.ShowBranches();
-                BuildTreeRecursive(br, branch);  // подветви
+                BuildTreeRecursive(br, branch); // подветви
 
-                br.ShowLeafs(true);              // листья в этой ветке
+                br.ShowLeafs(true); // листья в этой ветке
                 foreach (object leaf in br)
                 {
                     string leafName = leaf.ToString()!;
