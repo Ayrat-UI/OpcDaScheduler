@@ -8,7 +8,7 @@ using OpcDaScheduler.Models;
 
 namespace OpcDaScheduler.Services
 {
-    public static class ConfigStore
+    public static partial class ConfigStore
     {
         private static readonly JsonSerializerOptions _json = new()
         {

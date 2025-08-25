@@ -54,6 +54,21 @@ namespace OpcDaScheduler
         }
         // ==========================================================
 
+        // Открыть окно настроек периодов
+        private void OpenSettings_Click(object sender, RoutedEventArgs e)
+        {
+            var dlg = new SettingsDialog { Owner = this };
+            if (dlg.ShowDialog() == true)
+            {
+                Log.Information("Settings updated: dayStart={H}, shifts={N}, hourRule={EN}",
+                    ConfigStore.Current.Period.ProductionDayStartHour,
+                    ConfigStore.Current.Period.Shifts?.Count ?? 0,
+                    ConfigStore.Current.Period.HourRule?.Enabled ?? false);
+                MessageBox.Show("Настройки сохранены.", "Настройки",
+                    MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+        }
+
         // Найти OPC-DA серверы на указанном хосте (OPCEnum)
         private void RefreshServers_Click(object sender, RoutedEventArgs e)
         {
@@ -289,31 +304,53 @@ namespace OpcDaScheduler
                 // 1) Разовое чтение текущих значений
                 var values = ReadValuesOnce(_server, map.Keys);
 
-                // 2) Расчёт временных границ
+                // 2) Расчёт временных границ с учётом настроек
                 var now = PeriodHelper.NowLocal();
                 DateTime periodStart;
                 string periodType;
                 int? hourNo = null;
                 int? shiftNo = null;
 
+                // Для legacy-схемы заранее посчитаем prodDate
+                DateTime? legacyProdDate = null;
+
                 switch (type)
                 {
                     case PeriodType.Hour:
-                        periodStart = PeriodHelper.GetHourStart(now);
-                        periodType = "Hour";
-                        hourNo = now.Hour;
-                        break;
+                        {
+                            // Применяем спец-правило: и час, и дата
+                            var hr = PeriodHelper.ApplyHourRule(now);
+                            hourNo = hr.HourNo;
+                            legacyProdDate = hr.DateForLegacy;
+
+                            // !!! periodStart для НОВОЙ схемы должен соответствовать правилу:
+                            // дата = DateForLegacy, час = HourNo
+                            periodStart = new DateTime(
+                                hr.DateForLegacy.Year, hr.DateForLegacy.Month, hr.DateForLegacy.Day,
+                                hr.HourNo, 0, 0, now.Kind);
+
+                            periodType = "Hour";
+                            break;
+                        }
 
                     case PeriodType.Shift:
-                        periodStart = PeriodHelper.GetShiftStart(now);
-                        periodType = "Shift";
-                        shiftNo = PeriodHelper.GetShiftNo(now);
-                        break;
+                        {
+                            // Пишем за ПРЕДЫДУЩУЮ (завершившуюся) смену
+                            var prev = PeriodHelper.GetPreviousShiftForWrite(now);
+                            periodStart = prev.ShiftStart;     // для новой схемы (periodstart)
+                            periodType = "Shift";
+                            shiftNo = prev.ShiftNo;
+                            legacyProdDate = prev.ProductionDate; // для legacy (DATE)
+                            break;
+                        }
 
                     default: // Day
-                        periodStart = PeriodHelper.GetDayStart(now);
-                        periodType = "Day";
-                        break;
+                        {
+                            periodStart = PeriodHelper.GetDayStart(now);
+                            periodType = "Day";
+                            legacyProdDate = PeriodHelper.GetProductionDate(now);
+                            break;
+                        }
                 }
 
                 // 3) Запись в БД (апсерт)
@@ -352,12 +389,11 @@ namespace OpcDaScheduler
                     {
                         if (schema == TagDataSchema.LegacyV1)
                         {
-                            // Производственная дата (сутки с 22:00) в колонку date (DATE)
-                            var prodDate = PeriodHelper.GetDayStart(now).Date;
+                            var prodDate = legacyProdDate ?? PeriodHelper.GetProductionDate(now);
                             var periodStr = periodType.ToLowerInvariant(); // "hour"/"shift"/"day"
                             var tagName = string.IsNullOrWhiteSpace(cfg.Alias) ? itemId : cfg.Alias;
 
-                            // >>> Новое: гарантируем, что tag_name существует в справочнике ФК
+                            // Гарантируем, что tag_name существует в справочнике (FK)
                             await DbWriter.EnsureLegacyTagExistsAsync(conn, tagName);
 
                             await DbWriter.UpsertLegacyAsync(
