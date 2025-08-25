@@ -10,14 +10,13 @@ namespace OpcDaScheduler
 {
     public partial class SettingsDialog : Window
     {
-        private PeriodSettings _s;  // без readonly: нужно для сброса на дефолт
+        private PeriodSettings _s;
         private readonly ObservableCollection<ShiftDef> _shifts;
 
         public SettingsDialog()
         {
             InitializeComponent();
 
-            // Заполняем выпадающие 0..23
             for (int h = 0; h < 24; h++)
             {
                 DayStartHour.Items.Add(h);
@@ -31,8 +30,6 @@ namespace OpcDaScheduler
 
             LoadToUI(_s);
         }
-
-        // ===== helpers =====
 
         private static PeriodSettings Clone(PeriodSettings s) => new PeriodSettings
         {
@@ -57,24 +54,19 @@ namespace OpcDaScheduler
 
         private void LoadToUI(PeriodSettings s)
         {
-            // Сутки
             DayStartHour.SelectedItem = s.ProductionDayStartHour;
 
-            // Смены
             _shifts.Clear();
             foreach (var sh in s.Shifts.Select(Clone))
                 _shifts.Add(sh);
 
-            // Часы
             HourRuleEnabled.IsChecked = s.HourRule.Enabled;
             HourThreshold.SelectedItem = s.HourRule.ThresholdHour;
             HourWriteAs.SelectedItem = s.HourRule.WriteAsHour;
             HourShiftDate.IsChecked = s.HourRule.ShiftDateToNextDay;
 
-            // Предпросмотры
             TestDate.SelectedDate = DateTime.Today;
-            if (string.IsNullOrWhiteSpace(TestTime.Text))
-                TestTime.Text = "12:00";
+            if (string.IsNullOrWhiteSpace(TestTime.Text)) TestTime.Text = "12:00";
 
             RecalcDayPreview();
             RecalcHourPreview();
@@ -95,27 +87,23 @@ namespace OpcDaScheduler
             result.HourRule.WriteAsHour = HourWriteAs.SelectedItem is int wa ? wa : result.HourRule.WriteAsHour;
             result.HourRule.ShiftDateToNextDay = (HourShiftDate.IsChecked == true);
 
-            // Валидация
             foreach (var sh in result.Shifts)
             {
                 if (!TimeSpan.TryParseExact(sh.Start, "hh\\:mm", CultureInfo.InvariantCulture, out _))
                 {
-                    MessageBox.Show($"Смена №{sh.Number}: неверное время «{sh.Start}». Ожидается HH:mm",
+                    MessageBox.Show($"Смена №{sh.Number}: неверное время «{sh.Start}» (ожидается HH:mm)",
                         "Проверка", MessageBoxButton.OK, MessageBoxImage.Warning);
                     return false;
                 }
                 if (sh.LengthHours <= 0 || sh.LengthHours > 24)
                 {
-                    MessageBox.Show($"Смена №{sh.Number}: длительность должна быть 1..24 ч.",
+                    MessageBox.Show($"Смена №{sh.Number}: длительность 1..24 ч.",
                         "Проверка", MessageBoxButton.OK, MessageBoxImage.Warning);
                     return false;
                 }
             }
-
             return true;
         }
-
-        // ===== кнопки =====
 
         private void AddShift_Click(object sender, RoutedEventArgs e)
         {
@@ -131,23 +119,16 @@ namespace OpcDaScheduler
 
         private void ResetDefaults_Click(object sender, RoutedEventArgs e)
         {
-            var r = MessageBox.Show(
-                "Сбросить все настройки к заводским значениям?\n" +
-                "Изменения вступят в силу после нажатия «ОК».",
-                "Подтверждение",
-                MessageBoxButton.YesNo,
-                MessageBoxImage.Question);
-
-            if (r != MessageBoxResult.Yes) return;
+            if (MessageBox.Show("Сбросить все настройки к заводским?", "Подтверждение",
+                    MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
 
             _s = PeriodSettings.CreateDefault();
-            LoadToUI(_s); // перезаливаем в UI без сохранения
+            LoadToUI(_s);
         }
 
         private void Ok_Click(object sender, RoutedEventArgs e)
         {
-            if (!TryBuildSettingsFromUI(out var built))
-                return;
+            if (!TryBuildSettingsFromUI(out var built)) return;
 
             _s = built;
             ConfigStore.Current.Period = _s;
@@ -163,7 +144,7 @@ namespace OpcDaScheduler
             Close();
         }
 
-        // ===== предпросмотры =====
+        // ===== предпросмотры
 
         private void RecalcDayPreview()
         {
@@ -176,7 +157,6 @@ namespace OpcDaScheduler
                 var start = PeriodHelper.GetDayStart(now);
                 PreviewDay.Text = $"Сегодня: {now}\nНачало производственных суток: {start}";
             }
-
             ConfigStore.Current.Period = saved;
         }
 
@@ -188,10 +168,15 @@ namespace OpcDaScheduler
             if (TryBuildSettingsFromUI(out var tmp))
             {
                 ConfigStore.Current.Period = tmp;
-                var hw = PeriodHelper.GetHourForWrite(now);
-                PreviewHour.Text = $"Сейчас: {now:HH:mm}. Час для записи ⇒ дата={hw.ProductionDate:yyyy-MM-dd}, час={hw.HourNo}";
-            }
 
+                var hw = PeriodHelper.GetHourForWrite(now);
+                var baseD = PeriodHelper.GetProductionDate(now);
+
+                PreviewHour.Text =
+                    $"Сейчас: {now:HH:mm}.\n" +
+                    $"Час для записи ⇒ дата={hw.ProductionDate:yyyy-MM-dd}, час={hw.HourNo}, periodStart={hw.PeriodStart:yyyy-MM-dd HH\\:mm}\n" +
+                    $"(базовая прод. дата без правил: {baseD:yyyy-MM-dd})";
+            }
             ConfigStore.Current.Period = saved;
         }
 
@@ -200,7 +185,6 @@ namespace OpcDaScheduler
             var date = TestDate.SelectedDate ?? DateTime.Today;
             if (!TimeSpan.TryParseExact(TestTime.Text.Trim(), "hh\\:mm", CultureInfo.InvariantCulture, out var ts))
                 ts = new TimeSpan(12, 0, 0);
-
             var dt = new DateTime(date.Year, date.Month, date.Day, ts.Hours, ts.Minutes, 0);
 
             var saved = ConfigStore.Current.Period;
@@ -212,17 +196,16 @@ namespace OpcDaScheduler
                 var dayStart = PeriodHelper.GetDayStart(dt);
                 var currShiftNo = PeriodHelper.GetShiftNo(dt);
                 var currShiftStart = PeriodHelper.GetShiftStart(dt);
-                var prevShift = PeriodHelper.GetPreviousShiftForWrite(dt); // смена для записи
-                var hw = PeriodHelper.GetHourForWrite(dt);          // час для записи
+                var prevShift = PeriodHelper.GetPreviousShiftForWrite(dt);
+                var hw = PeriodHelper.GetHourForWrite(dt);
 
                 PreviewAll.Text =
                     $"Тестовое время: {dt}\n" +
                     $"- Производственные сутки: старт {dayStart}\n" +
                     $"- Текущая смена: №{currShiftNo}, начало {currShiftStart}\n" +
                     $"- Смена для записи: №{prevShift.ShiftNo}, дата={prevShift.ProductionDate:yyyy-MM-dd}, начало {prevShift.ShiftStart}\n" +
-                    $"- Час для записи: дата={hw.ProductionDate:yyyy-MM-dd}, час={hw.HourNo}";
+                    $"- Час для записи: дата={hw.ProductionDate:yyyy-MM-dd}, час={hw.HourNo}, periodStart={hw.PeriodStart:yyyy-MM-dd HH\\:mm}";
             }
-
             ConfigStore.Current.Period = saved;
         }
 

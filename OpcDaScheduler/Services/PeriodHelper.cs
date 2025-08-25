@@ -1,5 +1,4 @@
 ﻿using System;
-using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using OpcDaScheduler.Models;
@@ -8,8 +7,19 @@ namespace OpcDaScheduler.Services
 {
     public static class PeriodHelper
     {
+        // Безопасно получаем TZ: если в AppConfig что-то не так — берём локальный.
         private static TimeZoneInfo? _tz;
-        private static TimeZoneInfo Tz => _tz ??= TimeZoneInfo.FindSystemTimeZoneById(AppConfig.TimeZoneId);
+        private static TimeZoneInfo Tz
+        {
+            get
+            {
+                if (_tz != null) return _tz;
+                try { _tz = TimeZoneInfo.FindSystemTimeZoneById(AppConfig.TimeZoneId); }
+                catch { _tz = TimeZoneInfo.Local; }
+                return _tz!;
+            }
+        }
+
         private static PeriodSettings S => ConfigStore.Current.Period ?? PeriodSettings.CreateDefault();
 
         public static DateTime NowLocal() =>
@@ -18,7 +28,10 @@ namespace OpcDaScheduler.Services
         public static DateTime ToLocal(DateTime utc) =>
             TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(utc, DateTimeKind.Utc), Tz);
 
-        /// <summary>Начало производственных суток по настройке ProductionDayStartHour.</summary>
+        /// <summary>
+        /// Начало производственных суток по настройке ProductionDayStartHour.
+        /// Пример: start=22:00, 26.08 01:10 -> вернёт 25.08 22:00.
+        /// </summary>
         public static DateTime GetDayStart(DateTime local)
         {
             int h = Math.Clamp(S.ProductionDayStartHour, 0, 23);
@@ -27,20 +40,20 @@ namespace OpcDaScheduler.Services
         }
 
         /// <summary>
-        /// Производственная дата: дата календарного дня, к которому относятся текущие произв. сутки.
-        /// Пример: при старте суток 22:00 время 25.08 14:00 → prodDate = 25.08
+        /// Производственная дата: календарный день, к которому относятся текущие производственные сутки.
+        /// Пример: start=22:00, время 25.08 14:00 -> prodDate = 26.08.
         /// </summary>
         public static DateTime GetProductionDate(DateTime local) =>
             GetDayStart(local).AddDays(1).Date;
 
-        /// <summary>Начало текущей смены по списку Shifts.</summary>
+        /// <summary>Начало текущей смены.</summary>
         public static DateTime GetShiftStart(DateTime local)
         {
             var (idx, start) = GetCurrentShiftIndex(local);
             return start;
         }
 
-        /// <summary>Номер текущей смены по списку Shifts.</summary>
+        /// <summary>Номер текущей смены.</summary>
         public static int GetShiftNo(DateTime local)
         {
             var (idx, _) = GetCurrentShiftIndex(local);
@@ -48,19 +61,19 @@ namespace OpcDaScheduler.Services
             return S.Shifts[idx].Number;
         }
 
-        /// <summary>Календарное начало часа (без спец-правил).</summary>
+        /// <summary>Календарное начало часа (без правил).</summary>
         public static DateTime GetHourStart(DateTime local) =>
             new DateTime(local.Year, local.Month, local.Day, local.Hour, 0, 0, local.Kind);
 
         /// <summary>
-        /// Спец-правило для часовой записи:
-        /// если текущее время >= Threshold — писать как WriteAsHour,
-        /// и, при необходимости, сдвигать производственную дату на +1 день.
-        /// Возвращает (часы, датаДляLegacyDATE).
+        /// Час и производственная дата ДЛЯ ЗАПИСИ (часовые), с учётом правила:
+        /// если текущее время >= ThresholdHour — писать как WriteAsHour,
+        /// а дата при необходимости сдвигается на +1 день (ShiftDateToNextDay).
+        /// Возвращает: номер часа, производственную дату (для legacy) и periodStart (для новой схемы).
         /// </summary>
-        public static (int HourNo, DateTime DateForLegacy) ApplyHourRule(DateTime local)
+        public static (int HourNo, DateTime ProductionDate, DateTime PeriodStart) GetHourForWrite(DateTime local)
         {
-            var prodDate = GetDayStart(local).Date;
+            var prodDate = GetProductionDate(local);     // базовая прод. дата
             var hourNo = local.Hour;
 
             var r = S.HourRule ?? new HourRule();
@@ -69,29 +82,29 @@ namespace OpcDaScheduler.Services
                 hourNo = Math.Clamp(r.WriteAsHour, 0, 23);
                 if (r.ShiftDateToNextDay) prodDate = prodDate.AddDays(1);
             }
-            return (hourNo, prodDate);
-        }
 
-        /// <summary>
-        /// Возвращает целевой час для записи в БД по текущим настройкам:
-        /// (HourNo, ProductionDate, PeriodStart).
-        /// ProductionDate — DATE для legacy-схемы; PeriodStart — точка начала часа для новой схемы.
-        /// </summary>
-        public static (int HourNo, DateTime ProductionDate, DateTime PeriodStart) GetHourForWrite(DateTime local)
-        {
-            var (hourNo, prodDate) = ApplyHourRule(local);
-            // PeriodStart считаем как локальное время prodDate + hourNo:00
-            var periodStart = new DateTime(prodDate.Year, prodDate.Month, prodDate.Day, hourNo, 0, 0, local.Kind);
+            // periodStart — реальное начало «того» часа в календаре
+            var periodStart = new DateTime(local.Year, local.Month, local.Day, hourNo, 0, 0, local.Kind);
             return (hourNo, prodDate, periodStart);
         }
 
         /// <summary>
-        /// Вернуть предыдущую (уже завершившуюся) смену на момент nowLocal
-        /// и её производственную дату — используется при записи «на цикл назад».
+        /// АДАПТЕР ДЛЯ СТАРОГО КОДА: раньше использовался ApplyHourRule.
+        /// Теперь всё делает GetHourForWrite, а этот метод просто прокидывает нужные поля.
+        /// </summary>
+        public static (int HourNo, DateTime DateForLegacy) ApplyHourRule(DateTime local)
+        {
+            var hw = GetHourForWrite(local);
+            return (hw.HourNo, hw.ProductionDate);
+        }
+
+        /// <summary>
+        /// Предыдущая (уже завершившаяся) смена на момент nowLocal и её производственная дата —
+        /// используется при записи «на цикл назад».
         /// </summary>
         public static (int ShiftNo, DateTime ShiftStart, DateTime ProductionDate) GetPreviousShiftForWrite(DateTime nowLocal)
         {
-            var shifts = S.Shifts ?? new List<ShiftDef>();
+            var shifts = S.Shifts ?? new System.Collections.Generic.List<ShiftDef>();
             var baseStart = GetDayStart(nowLocal);
 
             var rel = shifts
@@ -107,7 +120,7 @@ namespace OpcDaScheduler.Services
             if (rel.Count == 0)
                 return (1, baseStart, GetProductionDate(baseStart));
 
-            // Определим текущую смену
+            // Определяем текущую смену
             var hoursSince = (nowLocal - baseStart).TotalMinutes / 60.0; // 0..24)
             int curIdx = 0;
             for (int i = 0; i < rel.Count; i++)
@@ -124,11 +137,11 @@ namespace OpcDaScheduler.Services
 
             // Предыдущая смена
             int prevIdx = (curIdx - 1 + rel.Count) % rel.Count;
-            double curRel = rel[curIdx].relHour;
             double prevRel = rel[prevIdx].relHour;
+            double curRel = rel[curIdx].relHour;
 
             var prevStart = baseStart.AddHours(prevRel);
-            // Если prevRel > curRel, значит её старт — «вчера» относительно baseStart
+            // Если prevRel > curRel — её старт «вчера» относительно baseStart
             if (prevRel > curRel) prevStart = prevStart.AddDays(-1);
 
             int prevNo = rel[prevIdx].sh.Number;
