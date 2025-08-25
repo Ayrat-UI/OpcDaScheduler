@@ -1,13 +1,14 @@
 ﻿using System;
 using System.Globalization;
 using System.Linq;
+using System.Collections.Generic;
 using OpcDaScheduler.Models;
 
 namespace OpcDaScheduler.Services
 {
     public static class PeriodHelper
     {
-        // Безопасно получаем TZ: если в AppConfig что-то не так — берём локальный.
+        // Часовой пояс из конфигурации (с безопасным фолбэком на локальный)
         private static TimeZoneInfo? _tz;
         private static TimeZoneInfo Tz
         {
@@ -16,7 +17,7 @@ namespace OpcDaScheduler.Services
                 if (_tz != null) return _tz;
                 try { _tz = TimeZoneInfo.FindSystemTimeZoneById(AppConfig.TimeZoneId); }
                 catch { _tz = TimeZoneInfo.Local; }
-                return _tz!;
+                return _tz;
             }
         }
 
@@ -40,57 +41,52 @@ namespace OpcDaScheduler.Services
         }
 
         /// <summary>
-        /// Производственная дата: календарный день, к которому относятся текущие производственные сутки.
+        /// Производственная дата (календарный день, к которому относятся текущие производственные сутки).
         /// Пример: start=22:00, время 25.08 14:00 -> prodDate = 26.08.
         /// </summary>
         public static DateTime GetProductionDate(DateTime local) =>
             GetDayStart(local).AddDays(1).Date;
 
-        /// <summary>Начало текущей смены.</summary>
-        public static DateTime GetShiftStart(DateTime local)
-        {
-            var (idx, start) = GetCurrentShiftIndex(local);
-            return start;
-        }
-
         /// <summary>Номер текущей смены.</summary>
         public static int GetShiftNo(DateTime local)
         {
             var (idx, _) = GetCurrentShiftIndex(local);
-            if (idx < 0) return 1;
-            return S.Shifts[idx].Number;
+            var shifts = S.Shifts ?? new List<ShiftDef>();
+            if (idx < 0 || idx >= shifts.Count) return 1;
+            return shifts[idx].Number;
         }
 
-        /// <summary>Календарное начало часа (без правил).</summary>
+        /// <summary>Начало текущей смены.</summary>
+        public static DateTime GetShiftStart(DateTime local)
+        {
+            var (_, start) = GetCurrentShiftIndex(local);
+            return start;
+        }
+
+        /// <summary>Календарное начало часа.</summary>
         public static DateTime GetHourStart(DateTime local) =>
             new DateTime(local.Year, local.Month, local.Day, local.Hour, 0, 0, local.Kind);
 
         /// <summary>
-        /// Час и производственная дата ДЛЯ ЗАПИСИ (часовые), с учётом правила:
-        /// если текущее время >= ThresholdHour — писать как WriteAsHour,
-        /// а дата при необходимости сдвигается на +1 день (ShiftDateToNextDay).
-        /// Возвращает: номер часа, производственную дату (для legacy) и periodStart (для новой схемы).
+        /// Час и производственная дата ДЛЯ ЗАПИСИ (часовые).
+        /// ВСЕГДА берём последний ПОЛНОСТЬЮ завершённый час (local → local.Hour - 1).
+        /// Пример: 21:45 → 20:00; 00:05 → 23:00 предыдущего календарного дня.
         /// </summary>
         public static (int HourNo, DateTime ProductionDate, DateTime PeriodStart) GetHourForWrite(DateTime local)
         {
-            var prodDate = GetProductionDate(local);     // базовая прод. дата
-            var hourNo = local.Hour;
+            // КЛЮЧЕВОЕ: прошлый час (никаких спец-правил!)
+            var prevHourStart = GetHourStart(local).AddHours(-1);
 
-            var r = S.HourRule ?? new HourRule();
-            if (r.Enabled && local.Hour >= r.ThresholdHour)
-            {
-                hourNo = Math.Clamp(r.WriteAsHour, 0, 23);
-                if (r.ShiftDateToNextDay) prodDate = prodDate.AddDays(1);
-            }
+            // Номер часа и прод.дата считаются именно для этого часа
+            var hourNo = prevHourStart.Hour;
+            var prodDate = GetProductionDate(prevHourStart);
 
-            // periodStart — реальное начало «того» часа в календаре
-            var periodStart = new DateTime(local.Year, local.Month, local.Day, hourNo, 0, 0, local.Kind);
-            return (hourNo, prodDate, periodStart);
+            // periodStart — фактическое начало того часа
+            return (hourNo, prodDate, prevHourStart);
         }
 
         /// <summary>
-        /// АДАПТЕР ДЛЯ СТАРОГО КОДА: раньше использовался ApplyHourRule.
-        /// Теперь всё делает GetHourForWrite, а этот метод просто прокидывает нужные поля.
+        /// Адаптер для старого кода (возвращает час и прод.дату).
         /// </summary>
         public static (int HourNo, DateTime DateForLegacy) ApplyHourRule(DateTime local)
         {
@@ -99,13 +95,15 @@ namespace OpcDaScheduler.Services
         }
 
         /// <summary>
-        /// Предыдущая (уже завершившаяся) смена на момент nowLocal и её производственная дата —
-        /// используется при записи «на цикл назад».
+        /// Предыдущая (уже завершившаяся) смена на момент nowLocal и её прод.дата.
         /// </summary>
         public static (int ShiftNo, DateTime ShiftStart, DateTime ProductionDate) GetPreviousShiftForWrite(DateTime nowLocal)
         {
-            var shifts = S.Shifts ?? new System.Collections.Generic.List<ShiftDef>();
+            var shifts = S.Shifts ?? new List<ShiftDef>();
             var baseStart = GetDayStart(nowLocal);
+
+            if (shifts.Count == 0)
+                return (1, baseStart, GetProductionDate(baseStart));
 
             var rel = shifts
                 .Select(sh =>
@@ -117,54 +115,37 @@ namespace OpcDaScheduler.Services
                 .OrderBy(x => x.relHour)
                 .ToList();
 
-            if (rel.Count == 0)
-                return (1, baseStart, GetProductionDate(baseStart));
-
-            // Определяем текущую смену
-            var hoursSince = (nowLocal - baseStart).TotalMinutes / 60.0; // 0..24)
+            var hoursSince = (nowLocal - baseStart).TotalHours;
             int curIdx = 0;
+
             for (int i = 0; i < rel.Count; i++)
             {
                 double cur = rel[i].relHour;
-                double next = rel[(i + 1) % rel.Count].relHour;
-
-                bool inInterval = next > cur
-                    ? (hoursSince >= cur && hoursSince < next)
-                    : (hoursSince >= cur || hoursSince < next); // переход через 24
+                double nxt = rel[(i + 1) % rel.Count].relHour;
+                bool inInterval = nxt > cur
+                    ? (hoursSince >= cur && hoursSince < nxt)
+                    : (hoursSince >= cur || hoursSince < nxt); // переход через 24
 
                 if (inInterval) { curIdx = i; break; }
             }
 
-            // Предыдущая смена
             int prevIdx = (curIdx - 1 + rel.Count) % rel.Count;
-            double prevRel = rel[prevIdx].relHour;
-            double curRel = rel[curIdx].relHour;
-
-            var prevStart = baseStart.AddHours(prevRel);
-            // Если prevRel > curRel — её старт «вчера» относительно baseStart
-            if (prevRel > curRel) prevStart = prevStart.AddDays(-1);
-
-            int prevNo = rel[prevIdx].sh.Number;
-            var prodDate = GetProductionDate(prevStart);
-
-            return (prevNo, prevStart, prodDate);
+            var prevStart = baseStart.AddHours(rel[prevIdx].relHour);
+            return (rel[prevIdx].sh.Number, prevStart, GetProductionDate(prevStart));
         }
 
-        // ===== внутреннее =====
+        // ===== вспомогательное =====
 
         private static (int idx, DateTime startLocal) GetCurrentShiftIndex(DateTime local)
         {
-            if (S.Shifts == null || S.Shifts.Count == 0)
-            {
-                var ds = GetDayStart(local);
-                return (-1, ds);
-            }
+            var shifts = S.Shifts ?? new List<ShiftDef>();
+            if (shifts.Count == 0)
+                return (0, GetDayStart(local));
 
-            var baseStart = GetDayStart(local);                 // начало производственных суток
-            var passed = local - baseStart;                     // сколько прошло
-            var hPassed = passed.TotalMinutes / 60.0;           // [0..24)
+            var baseStart = GetDayStart(local);
+            var hPassed = (local - baseStart).TotalHours;
 
-            var rel = S.Shifts
+            var rel = shifts
                 .Select(sh =>
                 {
                     var ts = ParseHHmm(sh.Start);
@@ -177,11 +158,11 @@ namespace OpcDaScheduler.Services
             for (int i = 0; i < rel.Count; i++)
             {
                 double cur = rel[i].relHour;
-                double next = rel[(i + 1) % rel.Count].relHour;
+                double nxt = rel[(i + 1) % rel.Count].relHour;
 
-                bool inInterval = next > cur
-                    ? (hPassed >= cur && hPassed < next)
-                    : (hPassed >= cur || hPassed < next); // переход через 24
+                bool inInterval = nxt > cur
+                    ? (hPassed >= cur && hPassed < nxt)
+                    : (hPassed >= cur || hPassed < nxt);
 
                 if (inInterval)
                 {
@@ -194,7 +175,7 @@ namespace OpcDaScheduler.Services
             return (0, baseStart.AddHours(first.relHour));
         }
 
-        private static TimeSpan ParseHHmm(string s)
+        private static TimeSpan ParseHHmm(string? s)
         {
             if (TimeSpan.TryParseExact(s?.Trim(), "hh\\:mm", CultureInfo.InvariantCulture, out var ts))
                 return ts;
