@@ -1,0 +1,32 @@
+﻿<Window x:Class="OpcDaScheduler.Views.ShellWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="OPC DA Scheduler" Height="720" Width="1120"
+        WindowStartupLocation="CenterScreen" Background="#FAFAFB">
+    <DockPanel>
+        <!-- Верхняя шапка -->
+        <Border Background="{StaticResource HeaderBrush}" DockPanel.Dock="Top" Padding="16,10">
+            <StackPanel>
+                <TextBlock Text="{Binding CurrentTitle}" Style="{StaticResource HeaderText}"/>
+                <TextBlock Text="{Binding CurrentSubtitle}" Foreground="#4B5563"/>
+            </StackPanel>
+        </Border>
+
+        <!-- Левая панель навигации -->
+        <Border Width="220" Background="White" DockPanel.Dock="Left" Padding="8">
+            <StackPanel>
+                <ToggleButton Style="{StaticResource NavButtonStyle}"
+                      Content="OPC-клиент"
+                      IsChecked="{Binding IsOpcSelected, Mode=TwoWay}"
+                      Click="NavOpc_Click"/>
+                <ToggleButton Style="{StaticResource NavButtonStyle}"
+                      Content="Часовые"
+                      IsChecked="{Binding IsHourlySelected, Mode=TwoWay}"
+                      Click="NavHourly_Click"/>
+            </StackPanel>
+        </Border>
+
+        <!-- Рабочая область -->
+        <ContentControl Content="{Binding CurrentView}"/>
+    </DockPanel>
+</Window>

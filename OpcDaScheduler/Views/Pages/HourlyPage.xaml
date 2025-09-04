@@ -1,0 +1,9 @@
+﻿<UserControl x:Class="OpcDaScheduler.Views.Pages.HourlyPage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid Margin="12">
+        <Border Background="White" Padding="12" CornerRadius="10">
+            <TextBlock Text="Часовые (заглушка). Здесь будет список тегов и настройка минуты часа."/>
+        </Border>
+    </Grid>
+</UserControl>
